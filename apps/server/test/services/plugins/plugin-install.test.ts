@@ -493,6 +493,346 @@ describe("plugin install flows", () => {
       });
     });
 
+    describe("source moves", () => {
+      function serverSource(marker: string): string {
+        return `export default async function plugin(bb) {
+          const settings = bb.settings.define({
+            floor: { type: "string", label: "Floor", default: "60" },
+            token: { type: "string", label: "Token", secret: true },
+            autoSync: { type: "boolean", label: "Auto sync", default: true },
+          });
+          bb.background.schedule("sweep", "0 * * * *", async () => {});
+          const state = globalThis.__sourceMoveState;
+          state.marker = ${JSON.stringify(marker)};
+          state.events.push("started:" + ${JSON.stringify(marker)});
+          state.settings = await settings.get();
+          bb.onDispose(async () => {
+            await new Promise(resolve => setImmediate(resolve));
+            state.events.push("disposed:" + ${JSON.stringify(marker)});
+          });
+          bb.onInstall(() => { state.installs += 1; });
+        }`;
+      }
+
+      async function fixture(nested = false) {
+        const repoDir = join(workDir, "source-move");
+        const rootDir = nested ? join(repoDir, "plugins", "movable") : repoDir;
+        await writePluginFixture(rootDir, { name: "bb-plugin-movable" });
+        await writeFile(join(rootDir, "server.ts"), serverSource("git"));
+        await initGitRepo(repoDir);
+        await commitAll(repoDir, "managed source");
+        await writeFile(join(rootDir, "server.ts"), serverSource("path"));
+        const state = {
+          marker: "",
+          settings: {},
+          installs: 0,
+          events: [] as string[],
+        };
+        vi.stubGlobal("__sourceMoveState", state);
+        const install = (kind: "git" | "path") =>
+          service.install(
+            kind === "git" ? `git:${repoDir}@main` : `path:${rootDir}`,
+            kind === "git" && nested
+              ? { kind: "subdirectory", path: "plugins/movable" }
+              : { kind: "root" },
+          );
+        return { repoDir, rootDir, state, install };
+      }
+
+      it.each([
+        { first: "git", nested: false },
+        { first: "path", nested: false },
+        { first: "git", nested: true },
+        { first: "path", nested: true },
+      ] as const)(
+        "preserves settings, secrets, schedules and storage through a $first roundtrip (nested: $nested)",
+        async ({ first, nested }) => {
+          const { repoDir, rootDir, state, install } = await fixture(nested);
+          await install(first);
+          await service.updateSettings("movable", {
+            floor: "1",
+            token: "source-move-secret",
+            autoSync: false,
+          });
+          const api = service.getApi("movable")!;
+          await api.storage.kv.set("cursor", { position: 42 });
+          api.storage
+            .database()
+            .exec(
+              "CREATE TABLE kept (value TEXT); INSERT INTO kept VALUES ('retained')",
+            );
+          const pluginDir = join(dataDir, "plugins", "movable");
+          const secretPath = join(pluginDir, "secrets", "token");
+          const databasePath = join(pluginDir, "data.db");
+          const notePath = join(pluginDir, "note.txt");
+          await writeFile(notePath, "retained note");
+          const paths = [pluginDir, secretPath, databasePath, notePath];
+          const identities = await Promise.all(
+            paths.map(async (path) => (await stat(path)).ino),
+          );
+          db.$client
+            .prepare(
+              "UPDATE plugin_schedules SET last_run_at = 123, last_status = 'ok' WHERE plugin_id = ?",
+            )
+            .run("movable");
+          const sourceBytes = await readFile(
+            join(rootDir, "server.ts"),
+            "utf8",
+          );
+          const gitStatus = await git(repoDir, ["status", "--porcelain"]);
+          const commit = await git(repoDir, ["rev-parse", "HEAD"]);
+          const opposite = first === "git" ? "path" : "git";
+          for (const kind of [opposite, first] as const) {
+            expect(await install(kind)).toMatchObject({
+              id: "movable",
+              status: "running",
+              enabled: true,
+            });
+            expect(getInstalledPlugin(db, "movable")).toMatchObject({
+              sourceKind: kind,
+              sourcePath: kind === "path" ? rootDir : null,
+              sourceGitUrl: kind === "git" ? repoDir : null,
+              gitResolvedCommit: kind === "git" ? commit : null,
+              activeArtifactId: kind === "git" ? expect.any(String) : null,
+            });
+            expect(state).toMatchObject({
+              marker: kind,
+              settings: {
+                floor: "1",
+                token: "source-move-secret",
+                autoSync: false,
+              },
+              installs: 1,
+            });
+            expect(state.events.slice(-2)).toEqual([
+              `disposed:${kind === "git" ? "path" : "git"}`,
+              `started:${kind}`,
+            ]);
+            expect((await service.getSettings("movable"))?.values).toEqual({
+              floor: "1",
+              token: { set: true },
+              autoSync: false,
+            });
+            expect(await readFile(secretPath, "utf8")).toBe(
+              "source-move-secret",
+            );
+            expect(
+              await service.getApi("movable")!.storage.kv.get("cursor"),
+            ).toEqual({ position: 42 });
+            expect(
+              service
+                .getApi("movable")!
+                .storage.database()
+                .prepare("SELECT value FROM kept")
+                .get(),
+            ).toEqual({ value: "retained" });
+            expect(
+              db.$client
+                .prepare(
+                  "SELECT name, cron, last_run_at, last_status FROM plugin_schedules WHERE plugin_id = ?",
+                )
+                .all("movable"),
+            ).toEqual([
+              {
+                name: "sweep",
+                cron: "0 * * * *",
+                last_run_at: 123,
+                last_status: "ok",
+              },
+            ]);
+            expect(
+              await Promise.all(
+                paths.map(async (path) => (await stat(path)).ino),
+              ),
+            ).toEqual(identities);
+            expect(await readFile(notePath, "utf8")).toBe("retained note");
+            expect(await readFile(join(rootDir, "server.ts"), "utf8")).toBe(
+              sourceBytes,
+            );
+            expect(await git(repoDir, ["status", "--porcelain"])).toBe(
+              gitStatus,
+            );
+            expect(await git(repoDir, ["rev-parse", "HEAD"])).toBe(commit);
+          }
+        },
+      );
+
+      it.each(["git", "path"] as const)(
+        "keeps a disabled %s source disabled when moved",
+        async (first) => {
+          const { install, state } = await fixture();
+          await install(first);
+          await service.updateSettings("movable", {
+            token: "disabled-secret",
+            autoSync: false,
+          });
+          await service.setEnabled("movable", false);
+          state.marker = "not-started";
+          const kind = first === "git" ? "path" : "git";
+          expect(await install(kind)).toMatchObject({
+            enabled: false,
+            status: "disabled",
+          });
+          expect(getInstalledPlugin(db, "movable")).toMatchObject({
+            sourceKind: kind,
+            enabled: false,
+          });
+          expect(state.marker).toBe("not-started");
+          expect(state.installs).toBe(1);
+          expect(service.getApi("movable")).toBeUndefined();
+          expect(await service.setEnabled("movable", true)).toMatchObject({
+            status: "running",
+          });
+          expect(state).toMatchObject({
+            marker: kind,
+            settings: { token: "disabled-secret", autoSync: false },
+            installs: 1,
+          });
+        },
+      );
+
+      it.each(["git", "path"] as const)(
+        "restores the %s registration when the other source fails to start",
+        async (first) => {
+          const { repoDir, rootDir, install, state } = await fixture();
+          await install(first);
+          await service.updateSettings("movable", {
+            token: "failure-secret",
+            autoSync: false,
+          });
+          const original = getInstalledPlugin(db, "movable");
+          await writeFile(
+            join(rootDir, "server.ts"),
+            'export default function plugin() { throw new Error("source move startup failed"); }',
+          );
+          if (first === "path") {
+            await commitAll(repoDir, "broken managed source");
+            await writeFile(join(rootDir, "server.ts"), serverSource("path"));
+          }
+          await expect(
+            install(first === "git" ? "path" : "git"),
+          ).rejects.toThrow(/failed to start.*was kept/);
+          expect(getInstalledPlugin(db, "movable")).toEqual({
+            ...original,
+            updatedAt: expect.any(Number),
+          });
+          expect(service.list().find((p) => p.id === "movable")).toMatchObject({
+            status: "running",
+            source: original!.source,
+          });
+          expect(state).toMatchObject({
+            marker: first,
+            settings: { token: "failure-secret", autoSync: false },
+            installs: 1,
+          });
+          expect((await service.getSettings("movable"))?.values).toMatchObject({
+            token: { set: true },
+            autoSync: false,
+          });
+        },
+      );
+
+      it.each(["git", "path"] as const)(
+        "keeps the %s instance untouched when the other manifest is invalid",
+        async (first) => {
+          const { repoDir, rootDir, install } = await fixture();
+          await install(first);
+          const original = getInstalledPlugin(db, "movable");
+          const api = service.getApi("movable");
+          const manifest = await readFile(
+            join(rootDir, "package.json"),
+            "utf8",
+          );
+          await writeFile(join(rootDir, "package.json"), "{ invalid json");
+          if (first === "path") {
+            await commitAll(repoDir, "invalid managed manifest");
+            await writeFile(join(rootDir, "package.json"), manifest);
+          }
+          await expect(
+            install(first === "git" ? "path" : "git"),
+          ).rejects.toThrow();
+          expect(getInstalledPlugin(db, "movable")).toEqual(original);
+          expect(service.getApi("movable")).toBe(api);
+          expect(service.list().find((p) => p.id === "movable")?.status).toBe(
+            "running",
+          );
+        },
+      );
+
+      it("restores the local registration after failed artifact promotion and allows a later Git move", async () => {
+        const { install, state } = await fixture();
+        await install("path");
+        await service.updateSettings("movable", {
+          token: "promotion-secret",
+          autoSync: false,
+        });
+        await service.getApi("movable")!.storage.kv.set("cursor", 42);
+        const original = getInstalledPlugin(db, "movable");
+        afterArtifactPromoted = async () => {
+          throw new Error("source promotion failed");
+        };
+        await expect(install("git")).rejects.toThrow("source promotion failed");
+        expect(getInstalledPlugin(db, "movable")).toEqual({
+          ...original,
+          updatedAt: expect.any(Number),
+        });
+        expect(service.list().find((p) => p.id === "movable")).toMatchObject({
+          status: "running",
+          source: original!.source,
+        });
+        expect(state).toMatchObject({
+          marker: "path",
+          settings: { token: "promotion-secret", autoSync: false },
+          installs: 1,
+        });
+        expect(await service.getApi("movable")!.storage.kv.get("cursor")).toBe(
+          42,
+        );
+        afterArtifactPromoted = undefined;
+        expect(await install("git")).toMatchObject({ status: "running" });
+        expect(getInstalledPlugin(db, "movable")?.sourceKind).toBe("git");
+        expect(state).toMatchObject({
+          marker: "git",
+          settings: { token: "promotion-secret", autoSync: false },
+          installs: 1,
+        });
+        expect(await service.getApi("movable")!.storage.kv.get("cursor")).toBe(
+          42,
+        );
+      });
+
+      it("does not turn a catalog git install into a direct local install", async () => {
+        const { repoDir, install } = await fixture();
+        await service.installCatalogPlugin({
+          marketplace: "acme",
+          entryId: "movable",
+          pluginId: "movable",
+          source: `git:${repoDir}@main`,
+          selection: { kind: "root" },
+        });
+        const original = getInstalledPlugin(db, "movable");
+        await expect(install("path")).rejects.toThrow(
+          /already installed from.*remove it first/,
+        );
+        expect(getInstalledPlugin(db, "movable")).toEqual(original);
+      });
+
+      it("still refuses duplicate managed installs and managed-to-managed source changes", async () => {
+        const { install } = await fixture();
+        await install("git");
+        const original = getInstalledPlugin(db, "movable");
+        await expect(install("git")).rejects.toThrow(/already installed; use/);
+        const otherRepo = join(workDir, "other-repo");
+        await writePluginFixture(otherRepo, { name: "bb-plugin-movable" });
+        await initGitRepo(otherRepo);
+        await commitAll(otherRepo, "other source");
+        await expect(
+          service.install(`git:${otherRepo}@main`, { kind: "root" }),
+        ).rejects.toThrow(/already installed from.*remove it first/);
+        expect(getInstalledPlugin(db, "movable")).toEqual(original);
+      });
+    });
+
     it("stamps catalog provenance for a git official catalog entry", async () => {
       const repoDir = join(workDir, "repo-catalog");
       await writePluginFixture(repoDir, { name: "bb-plugin-catalog-git" });

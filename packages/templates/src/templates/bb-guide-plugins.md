@@ -31,9 +31,10 @@ under `<bb-data-dir>/plugins/<id>/` (SQLite database, secrets, logs).
                                  --subdirectory <path> or --plugin <name>
                                  selects one plugin of a multi-plugin
                                  repository; --tag-prefix <prefix> scopes a
-                                 git: semver range. Installing a local path
-                                 for an id already installed from another
-                                 path moves it and keeps its settings.
+                                 git: semver range. Direct installs with the
+                                 same plugin id can move between git: and
+                                 path:, or between local paths, keeping
+                                 settings, secrets, schedules and enablement.
                                  Installs run one at a time as server jobs
                                  that continue if the CLI or app disconnects;
                                  a repeat request joins the active job.
@@ -272,16 +273,34 @@ Updates and pinning
 
 Updates are manual: `bb plugin outdated` checks tracking sources and
 `bb plugin update` applies compatible candidates. Reinstalling an installed
-managed plugin is refused; use `bb plugin update`. A failed activation restores
-the previous version and leaves the failure visible.
+managed plugin from the same source is refused; use `bb plugin update`.
+A failed activation restores the previous version and leaves the failure visible.
 
 Exact npm versions, Git tags and commits, path sources, and bundled official
 plugins are pinned. npm ranges, dist-tags, and omitted specs, omitted Git refs
 (the default branch), Git branches, and Git semver ranges track compatible
-updates. Change a pinned git:/npm: source with `bb plugin remove` (which
-deletes settings, secrets, and schedules) and a fresh install. Edit a local
-path plugin in place and `bb plugin reload <id>`, or move it with
-`bb plugin install path:<new dir>`; both keep its configuration.
+updates. To change a direct Git plugin to local development, install its local
+folder with the same plugin id:
+
+  bb plugin install path:/work/repo/plugins/example
+  bb plugin reload example
+  bb plugin install git:github.com/acme/repo@main --subdirectory plugins/example
+
+The first install switches to the working folder; reload applies local edits.
+The last install switches back to Git. Both switches retain settings, secrets,
+schedules, KV storage, the plugin database and the enabled/disabled state.
+Install hooks do not run again. The new source is validated before replacement;
+if it fails to start, bb restores the previous registration. This does not undo
+side effects performed by plugin code during startup. Prepare the local folder's
+dependencies first. Builds may regenerate artifacts; switching does not rewrite
+source files or Git commits.
+
+This applies only to direct Git/path installs, not catalog, npm or bundled
+sources. Changing between two managed sources still requires
+`bb plugin remove` (which deletes settings, secrets and schedules) and a fresh
+install. Moving between local paths with `bb plugin install path:<new dir>`
+also keeps configuration. A disabled plugin stays disabled when moved; reinstalling
+the very same local path retains its existing behavior of enabling the plugin.
 
 Managed git:/npm: installs refuse engines.bb and engines.bbPluginSdk
 mismatches, manifest and artifact identity mismatches, and ids reserved by

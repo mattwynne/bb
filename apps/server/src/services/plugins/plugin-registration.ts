@@ -255,21 +255,28 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     });
   }
 
-  function pathSourceMoveFrom(
+  function sourceMoveFrom(
     existing: InstalledPluginRow | undefined,
     identity: InstallRegistrationIdentity,
   ): InstalledPluginRow | undefined {
     if (
       existing === undefined ||
       existing.provenance !== "direct" ||
-      existing.sourceKind !== "path" ||
-      identity.provenance.kind !== "direct" ||
-      identity.sourceIntent.kind !== "path" ||
-      existing.sourcePath === identity.sourceIntent.canonicalPath
+      identity.provenance.kind !== "direct"
     ) {
       return undefined;
     }
-    return existing;
+    const intent = identity.sourceIntent;
+    if (intent.kind === "path") {
+      return existing.sourceKind === "git" ||
+        (existing.sourceKind === "path" &&
+          existing.sourcePath !== intent.canonicalPath)
+        ? existing
+        : undefined;
+    }
+    return existing.sourceKind === "path" && intent.kind === "git"
+      ? existing
+      : undefined;
   }
 
   function moveStartFailure(pluginId: string): string | null {
@@ -298,14 +305,17 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
     identity: InstallRegistrationIdentity,
     pluginId: string,
   ): void {
-    if (existing === undefined) return;
+    if (
+      existing === undefined ||
+      sourceMoveFrom(existing, identity) !== undefined
+    )
+      return;
     if (
       !rowMatchesInstallSource(
         existing,
         identity.provenance,
         identity.sourceIntent,
-      ) &&
-      pathSourceMoveFrom(existing, identity) === undefined
+      )
     ) {
       throw new Error(
         `plugin id "${pluginId}" is already installed from ${existing.source}; remove it first`,
@@ -365,7 +375,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
       const existing = getInstalledPlugin(deps.db, manifest.id);
       isFreshInstall = existing === undefined;
       assertInstallRegistrationAvailable(existing, args, manifest.id);
-      const movedFrom = pathSourceMoveFrom(existing, args);
+      const movedFrom = sourceMoveFrom(existing, args);
       await disposeOne(manifest.id);
       try {
         await args.beforePersist?.();
@@ -410,7 +420,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
           forgetMutableRoot(movedFrom.rootDir);
         }
         logger.info(
-          `plugin ${manifest.id} source moved from ${movedFrom.source} to ${args.source}; settings, secrets, and schedules were kept`,
+          `plugin ${manifest.id} source moved from ${movedFrom.sourceKind} to ${args.sourceIntent.kind}; settings, secrets, and schedules were kept`,
         );
       }
     });

@@ -1041,7 +1041,7 @@ export function registerPluginCommands(
   plugin
     .command("install <source>")
     .description(
-      "Install a catalog entry by name or <entry>@<marketplace>, a Git repository URL, a local path, builtin:<name>, git:<url>[@<ref|semver-range>], or npm:<name>@<version>. A catalog entry from a third-party marketplace is not reviewed by BB, so its confirmation names the marketplace, the author, and the exact resolved source (managed sources validate engines ranges and build artifacts; bundled plugin ids are reserved)",
+      "Install a catalog entry by name or <entry>@<marketplace>, a Git repository URL, a local path, builtin:<name>, git:<url>[@<ref|semver-range>], or npm:<name>@<version>. A catalog entry from a third-party marketplace is not reviewed by BB, so its confirmation names the marketplace, the author, and the exact resolved source (managed sources validate engines ranges and build artifacts; bundled plugin ids are reserved). Direct Git and local-path installs with the same plugin id can switch sources without deleting configuration or changing enablement",
     )
     .option(
       "--subdirectory <path>",
@@ -1115,8 +1115,11 @@ export function registerPluginCommands(
                 const installed = plugins.find((p) => p.id === pluginId);
                 if (
                   installed !== undefined &&
-                  installed.source.startsWith("path:") &&
-                  installed.rootDir !== path
+                  installed.provenance === "direct" &&
+                  ((installed.source.startsWith("path:") &&
+                    installed.rootDir !== path) ||
+                    installed.source.startsWith("git:") ||
+                    /^https?:\/\//iu.test(installed.source))
                 ) {
                   summary = `${summary}\nThis moves "${pluginId}" from ${installed.rootDir}; its settings, secrets, and schedules are kept.`;
                 }

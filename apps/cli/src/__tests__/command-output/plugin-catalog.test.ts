@@ -1,4 +1,6 @@
-import { sep } from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   collectLogPayloads,
@@ -241,6 +243,70 @@ describe("bb plugin catalog", () => {
     expect(body.source.startsWith("path:")).toBe(true);
     expect(body.source.endsWith(`${sep}linear`)).toBe(true);
   });
+
+  it.each([
+    { source: "path:/previous/linear", provenance: "direct", moves: true },
+    {
+      source: "git:https://github.com/acme/linear@main",
+      provenance: "direct",
+      moves: true,
+    },
+    {
+      source: "https://github.com/acme/linear",
+      provenance: "direct",
+      moves: true,
+    },
+    {
+      source: "git:https://github.com/acme/linear@main",
+      provenance: "catalog",
+      moves: false,
+    },
+  ])(
+    "describes configuration retention for a $provenance $source to path move: $moves",
+    async ({ source, provenance, moves }) => {
+      const rootDir = await mkdtemp(join(tmpdir(), "bb-cli-source-move-"));
+      try {
+        await writeFile(
+          join(rootDir, "package.json"),
+          JSON.stringify({ name: "bb-plugin-linear", version: "1.4.2" }),
+        );
+        vi.mocked(fetch).mockResolvedValueOnce(
+          json({ plugins: [{ ...installedPlugin, source, provenance }] }),
+        );
+        vi.mocked(fetch).mockResolvedValueOnce(
+          json({
+            ok: true,
+            plugin: {
+              ...installedPlugin,
+              source: `path:${rootDir}`,
+              rootDir,
+              provenance: "direct",
+            },
+          }),
+        );
+        await runCommand(
+          ["plugin", "install", `path:${rootDir}`, "--yes"],
+          register,
+        );
+        const output = collectLogPayloads(vi.mocked(console.log)).join("\n");
+        expect(output.includes('This moves "linear"')).toBe(moves);
+        if (moves)
+          expect(output).toContain("settings, secrets, and schedules are kept");
+        expect(output).toContain("Plugins are full-trust code");
+        expect(
+          vi.mocked(fetch).mock.calls.map((call) => String(call[0])),
+        ).toEqual([
+          "http://server/api/v1/plugins",
+          "http://server/api/v1/plugins/install",
+        ]);
+        expect(
+          JSON.parse(String(vi.mocked(fetch).mock.calls[1]?.[1]?.body)),
+        ).toEqual({ source: `path:${rootDir}` });
+      } finally {
+        await rm(rootDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("installs a pasted GitHub repository URL as a direct source", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(

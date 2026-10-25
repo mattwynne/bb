@@ -697,11 +697,12 @@ export function registerSystemRoutes(
   });
 
   get(routes.version, async (context, query) =>
-    context.json(
-      await deps.appVersion.getSystemVersion({
+    context.json({
+      ...(await deps.appVersion.getSystemVersion({
         forceRefresh: query.force === "true",
-      }),
-    ),
+      })),
+      experimental_directPluginSourceMoves: true,
+    }),
   );
 
   get(routes.appUpdate, async (context, query) =>

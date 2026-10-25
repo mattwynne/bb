@@ -14,6 +14,21 @@ question.
 [provider-bridge-protocol.md](provider-bridge-protocol.md). An entry without
 a "Docs:" line has no owning doc, so it keeps the essential contract itself.
 
+## Direct plugin source-move capability
+
+`GET /api/v1/system/version` and `sdk.system.version()` may return
+`experimental_directPluginSourceMoves: true`. This means the existing direct
+plugin install operation supports same-ID Git↔path moves without removal,
+retains configuration and enablement, and restores the prior registration if
+the candidate fails to start. An absent field is not support. It does not grant
+catalog/npm/builtin replacement or undo plugin startup side effects.
+
+The flag describes the registration path used by core install jobs, the CLI,
+and SDK; it is not a second operation. Clients must verify support before
+replacing a destructive source-switch workaround. No host-daemon wire changes.
+Before stabilization, settle the capability naming and representation with
+upstream and retain backward-compatible reads from servers without the field.
+
 ## Composer popups
 
 `ComposerCustomization.experimental_popups` registers `{ id, label, component }`

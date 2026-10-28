@@ -261,8 +261,13 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
   ): InstalledPluginRow | undefined {
     if (
       existing === undefined ||
-      existing.provenance !== "direct" ||
-      identity.provenance.kind !== "direct"
+      identity.provenance.kind !== "direct" ||
+      (existing.provenance !== "direct" &&
+        !(
+          existing.provenance === "catalog" &&
+          existing.sourceKind === "git" &&
+          identity.sourceIntent.kind === "path"
+        ))
     ) {
       return undefined;
     }

@@ -514,7 +514,7 @@ describe("plugin install flows", () => {
         }`;
       }
 
-      async function fixture(nested = false) {
+      async function fixture(nested = false, catalog = false) {
         const repoDir = join(workDir, "source-move");
         const rootDir = nested ? join(repoDir, "plugins", "movable") : repoDir;
         await writePluginFixture(rootDir, { name: "bb-plugin-movable" });
@@ -529,25 +529,45 @@ describe("plugin install flows", () => {
           events: [] as string[],
         };
         vi.stubGlobal("__sourceMoveState", state);
-        const install = (kind: "git" | "path") =>
-          service.install(
-            kind === "git" ? `git:${repoDir}@main` : `path:${rootDir}`,
+        let firstInstall = true;
+        const install = async (kind: "git" | "path") => {
+          const selection =
             kind === "git" && nested
-              ? { kind: "subdirectory", path: "plugins/movable" }
-              : { kind: "root" },
-          );
+              ? { kind: "subdirectory" as const, path: "plugins/movable" }
+              : { kind: "root" as const };
+          const result =
+            firstInstall && catalog && kind === "git"
+              ? await service.installCatalogPlugin({
+                  marketplace: "pa-for-bb",
+                  entryId: "movable",
+                  pluginId: "movable",
+                  source: `git:${repoDir}@main`,
+                  selection,
+                })
+              : await service.install(
+                  kind === "git" ? `git:${repoDir}@main` : `path:${rootDir}`,
+                  selection,
+                );
+          firstInstall = false;
+          return result;
+        };
         return { repoDir, rootDir, state, install };
       }
 
       it.each([
-        { first: "git", nested: false },
-        { first: "path", nested: false },
-        { first: "git", nested: true },
-        { first: "path", nested: true },
+        { first: "git", nested: false, catalog: false },
+        { first: "path", nested: false, catalog: false },
+        { first: "git", nested: true, catalog: false },
+        { first: "path", nested: true, catalog: false },
+        { first: "git", nested: false, catalog: true },
+        { first: "git", nested: true, catalog: true },
       ] as const)(
-        "preserves settings, secrets, schedules and storage through a $first roundtrip (nested: $nested)",
-        async ({ first, nested }) => {
-          const { repoDir, rootDir, state, install } = await fixture(nested);
+        "preserves settings, secrets, schedules and storage through a $first roundtrip (nested: $nested, catalog: $catalog)",
+        async ({ first, nested, catalog }) => {
+          const { repoDir, rootDir, state, install } = await fixture(
+            nested,
+            catalog,
+          );
           await install(first);
           await service.updateSettings("movable", {
             floor: "1",
@@ -589,6 +609,9 @@ describe("plugin install flows", () => {
               enabled: true,
             });
             expect(getInstalledPlugin(db, "movable")).toMatchObject({
+              provenance: "direct",
+              catalogEntryId: null,
+              catalogMarketplaceName: null,
               sourceKind: kind,
               sourcePath: kind === "path" ? rootDir : null,
               sourceGitUrl: kind === "git" ? repoDir : null,
@@ -801,19 +824,78 @@ describe("plugin install flows", () => {
         );
       });
 
-      it("does not turn a catalog git install into a direct local install", async () => {
-        const { repoDir, install } = await fixture();
-        await service.installCatalogPlugin({
-          marketplace: "acme",
-          entryId: "movable",
-          pluginId: "movable",
-          source: `git:${repoDir}@main`,
-          selection: { kind: "root" },
-        });
+      it.each(["disabled", "startup-failure", "invalid-manifest"] as const)(
+        "keeps catalog identity and configuration safe during %s",
+        async (mode) => {
+          const { rootDir, install, state } = await fixture(true, true);
+          await install("git");
+          await service.updateSettings("movable", {
+            token: "catalog-secret",
+            floor: "1",
+          });
+          if (mode === "disabled") await service.setEnabled("movable", false);
+          const original = getInstalledPlugin(db, "movable");
+          if (mode === "startup-failure") {
+            await writeFile(
+              join(rootDir, "server.ts"),
+              'export default function plugin() { throw new Error("fixture startup failed"); }',
+            );
+          }
+          if (mode === "invalid-manifest")
+            await writeFile(join(rootDir, "package.json"), "{invalid");
+          if (mode === "disabled") {
+            expect(await install("path")).toMatchObject({
+              enabled: false,
+              status: "disabled",
+              provenance: "direct",
+            });
+            expect(state.installs).toBe(1);
+            expect(service.getApi("movable")).toBeUndefined();
+            await service.setEnabled("movable", true);
+          } else {
+            await expect(install("path")).rejects.toThrow(
+              mode === "startup-failure" ? /failed to start/ : /./,
+            );
+            expect(getInstalledPlugin(db, "movable")).toEqual({
+              ...original,
+              updatedAt: expect.any(Number),
+            });
+            expect(
+              service.list().find((p) => p.id === "movable"),
+            ).toMatchObject({
+              status: "running",
+              provenance: "catalog",
+              catalogEntryId: "movable",
+              catalogMarketplaceName: "pa-for-bb",
+            });
+          }
+          expect((await service.getSettings("movable"))?.values).toMatchObject({
+            floor: "1",
+            token: { set: true },
+          });
+          expect(
+            await readFile(
+              join(dataDir, "plugins/movable/secrets/token"),
+              "utf8",
+            ),
+          ).toBe("catalog-secret");
+        },
+      );
+
+      it("still refuses catalog-to-managed changes and duplicate catalog installs", async () => {
+        const { repoDir, install } = await fixture(true, true);
+        await install("git");
         const original = getInstalledPlugin(db, "movable");
-        await expect(install("path")).rejects.toThrow(
-          /already installed from.*remove it first/,
-        );
+        await expect(install("git")).rejects.toThrow(/already installed/);
+        await expect(
+          service.installCatalogPlugin({
+            marketplace: "pa-for-bb",
+            entryId: "movable",
+            pluginId: "movable",
+            source: `git:${repoDir}@main`,
+            selection: { kind: "subdirectory", path: "plugins/movable" },
+          }),
+        ).rejects.toThrow(/already installed/);
         expect(getInstalledPlugin(db, "movable")).toEqual(original);
       });
 

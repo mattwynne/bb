@@ -29,6 +29,23 @@ replacing a destructive source-switch workaround. No host-daemon wire changes.
 Before stabilization, settle the capability naming and representation with
 upstream and retain backward-compatible reads from servers without the field.
 
+## Marketplace Git to local source-move capability
+
+`GET /api/v1/system/version` and `sdk.system.version()` may also return
+`experimental_catalogGitToLocalSourceMoves: true`. This separately authorizes
+same-ID moves from a Git-backed marketplace registration to a direct local
+path, using the ordinary install lifecycle. It retains configuration, storage,
+enablement and failed-start restoration, including the prior marketplace
+registration on failure. An absent, false or unavailable flag is not support.
+The direct-source flag alone does not authorize this transition.
+
+A successful local move replaces marketplace ownership with direct ownership.
+A subsequent direct Git install remains direct; it does not silently restore
+marketplace ownership. npm, bundled and managed-to-managed replacements remain
+outside this capability. There is no automatic move, uninstall or data migration.
+Core install jobs, the SDK and CLI share this implementation. Before stabilizing,
+agree the marketplace-ownership behavior and capability representation upstream.
+
 ## Composer popups
 
 `ComposerCustomization.experimental_popups` registers `{ id, label, component }`

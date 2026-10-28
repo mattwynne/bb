@@ -33,6 +33,7 @@ describe("GET /api/v1/system/version", () => {
         expect(response.status).toBe(200);
         const body = (await readJson(response)) as SystemVersionResponse;
         expect(body.experimental_directPluginSourceMoves).toBe(true);
+        expect(body.experimental_catalogGitToLocalSourceMoves).toBe(true);
         expect(body.isDevelopment).toBe(true);
         expect(body.updateAvailable).toBe(false);
         expect(body.latestVersion).toBeNull();

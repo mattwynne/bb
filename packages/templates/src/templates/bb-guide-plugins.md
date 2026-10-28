@@ -295,8 +295,11 @@ side effects performed by plugin code during startup. Prepare the local folder's
 dependencies first. Builds may regenerate artifacts; switching does not rewrite
 source files or Git commits.
 
-This applies only to direct Git/path installs, not catalog, npm or bundled
-sources. Changing between two managed sources still requires
+Git-backed marketplace installs can also switch to a direct local path this
+way. A successful switch replaces marketplace ownership with direct ownership;
+switching back with a Git URL stays a direct Git installation. A failed switch
+restores the original marketplace registration. npm and bundled sources cannot
+use this transition. Changing between two managed sources still requires
 `bb plugin remove` (which deletes settings, secrets and schedules) and a fresh
 install. Moving between local paths with `bb plugin install path:<new dir>`
 also keeps configuration. A disabled plugin stays disabled when moved; reinstalling

@@ -1041,7 +1041,7 @@ export function registerPluginCommands(
   plugin
     .command("install <source>")
     .description(
-      "Install a catalog entry by name or <entry>@<marketplace>, a Git repository URL, a local path, builtin:<name>, git:<url>[@<ref|semver-range>], or npm:<name>@<version>. A catalog entry from a third-party marketplace is not reviewed by BB, so its confirmation names the marketplace, the author, and the exact resolved source (managed sources validate engines ranges and build artifacts; bundled plugin ids are reserved). Direct Git and local-path installs with the same plugin id can switch sources without deleting configuration or changing enablement",
+      "Install a catalog entry by name or <entry>@<marketplace>, a Git repository URL, a local path, builtin:<name>, git:<url>[@<ref|semver-range>], or npm:<name>@<version>. A catalog entry from a third-party marketplace is not reviewed by BB, so its confirmation names the marketplace, the author, and the exact resolved source (managed sources validate engines ranges and build artifacts; bundled plugin ids are reserved). Direct Git and local-path installs with the same plugin id can switch sources without deleting configuration or changing enablement. Git-backed marketplace installs can also switch to a direct local path; switching back to Git uses a direct Git install rather than restoring marketplace ownership",
     )
     .option(
       "--subdirectory <path>",

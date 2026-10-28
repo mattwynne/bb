@@ -702,6 +702,7 @@ export function registerSystemRoutes(
         forceRefresh: query.force === "true",
       })),
       experimental_directPluginSourceMoves: true,
+      experimental_catalogGitToLocalSourceMoves: true,
     }),
   );
 
